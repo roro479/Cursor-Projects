@@ -1,0 +1,12 @@
+{
+  "name": "cursor-output-deck",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:deck": "node build_deck.mjs"
+  },
+  "dependencies": {
+    "pptxgenjs": "*"
+  }
+}
+

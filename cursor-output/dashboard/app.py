@@ -97,6 +97,64 @@ def _seed_form_state() -> None:
         st.session_state[f"form_{field}"] = value
 
 
+def _load_into_form(src: dict) -> None:
+    """Populate form_* session_state keys from a request dict.
+
+    Only keys present in src are written; missing keys leave existing values
+    untouched. Type conversions keep the widgets happy (date_input needs a
+    date object, selectbox needs a value from its options list).
+    """
+    scalar_keys = (
+        "RequestID",
+        "PatientID",
+        "PatientFirstName",
+        "PatientLastName",
+        "ProviderID",
+        "ProviderName",
+        "NPI",
+        "ProcedureCode",
+        "ProcedureDescription",
+        "ClinicalNotes",
+    )
+    for k in scalar_keys:
+        if k in src and src[k] is not None:
+            st.session_state[f"form_{k}"] = str(src[k])
+
+    if "DiagnosisCodes" in src and src["DiagnosisCodes"] is not None:
+        v = src["DiagnosisCodes"]
+        st.session_state["form_DiagnosisCodes"] = (
+            ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)
+        )
+
+    if "DiagnosisDescriptions" in src and src["DiagnosisDescriptions"] is not None:
+        v = src["DiagnosisDescriptions"]
+        st.session_state["form_DiagnosisDescriptions"] = (
+            "; ".join(str(x) for x in v) if isinstance(v, list) else str(v)
+        )
+
+    if "RequestedServiceDate" in src and src["RequestedServiceDate"] is not None:
+        v = src["RequestedServiceDate"]
+        try:
+            if isinstance(v, date):
+                st.session_state["form_RequestedServiceDate"] = v
+            else:
+                st.session_state["form_RequestedServiceDate"] = date.fromisoformat(
+                    str(v)
+                )
+        except ValueError:
+            pass
+
+    if "UrgencyLevel" in src and src["UrgencyLevel"] is not None:
+        v = str(src["UrgencyLevel"]).strip().lower()
+        if v in URGENCY_OPTIONS:
+            st.session_state["form_UrgencyLevel"] = v
+
+    if "requires_manual_review" in src:
+        st.session_state["form_RequiresManualReview"] = bool(
+            src["requires_manual_review"]
+        )
+
+
 def _init_session_state() -> None:
     if "cpt_list" not in st.session_state:
         st.session_state.cpt_list = _default_cpt_list()
@@ -113,6 +171,8 @@ def _init_session_state() -> None:
         st.session_state.batch_results_df = None
     if "last_batch_file_id" not in st.session_state:
         st.session_state.last_batch_file_id = None
+    if "last_batch_raw" not in st.session_state:
+        st.session_state.last_batch_raw = None
     if "form_initialized" not in st.session_state:
         _seed_form_state()
         st.session_state.form_initialized = True
@@ -384,6 +444,78 @@ with tab_gate:
     builder_col, result_col = st.columns([3, 2])
 
     with builder_col:
+        with st.expander(
+            "Quick Load — paste or import a request", expanded=False
+        ):
+            left_ql, right_ql = st.columns(2)
+            with left_ql:
+                st.markdown("**Paste JSON**")
+                paste_text = st.text_area(
+                    "Paste auth request JSON",
+                    height=150,
+                    placeholder='{"RequestID": "...", "ProcedureCode": "..."}',
+                    key="quickload_paste_text",
+                    label_visibility="collapsed",
+                )
+                if st.button("Load from JSON", key="quickload_paste_btn"):
+                    try:
+                        parsed = (
+                            json.loads(paste_text) if paste_text.strip() else {}
+                        )
+                        if not isinstance(parsed, dict):
+                            raise ValueError("Expected a JSON object.")
+                    except Exception:
+                        st.error("Invalid JSON — check formatting and try again.")
+                    else:
+                        _load_into_form(parsed)
+                        st.success(
+                            "Form populated from JSON — review fields and click Evaluate."
+                        )
+                        st.rerun()
+
+            with right_ql:
+                st.markdown("**Load from uploaded batch**")
+                if (
+                    st.session_state.batch_results_df is None
+                    or st.session_state.last_batch_raw is None
+                ):
+                    st.caption("Upload a batch below to enable this option.")
+                else:
+                    ids = list(
+                        st.session_state.batch_results_df["RequestID"].astype(str)
+                    )
+                    options = ["-- select a request --"] + ids
+                    selected_id = st.selectbox(
+                        "Select a request from last batch",
+                        options,
+                        key="quickload_batch_select",
+                        label_visibility="collapsed",
+                    )
+                    if st.button(
+                        "Load selected request", key="quickload_batch_btn"
+                    ):
+                        if selected_id == options[0]:
+                            st.warning("Pick a RequestID first.")
+                        else:
+                            match = next(
+                                (
+                                    r
+                                    for r in st.session_state.last_batch_raw
+                                    if str(r.get("RequestID")) == selected_id
+                                ),
+                                None,
+                            )
+                            if match is None:
+                                st.error(
+                                    f"Could not find {selected_id} in last batch."
+                                )
+                            else:
+                                _load_into_form(match)
+                                st.success(
+                                    f"Loaded request {selected_id} into form."
+                                )
+                                st.rerun()
+
         with st.form("auth_request_form", clear_on_submit=False):
             st.subheader("Auth Request Builder")
 
@@ -549,6 +681,7 @@ with tab_gate:
                 "Expected a JSON array of request objects."
             )
         else:
+            st.session_state.last_batch_raw = requests_list
             results_by_decision = _run_gate_batch(requests_list)
             flat_rows: list[dict[str, Any]] = []
             for decision_key, result_list in results_by_decision.items():
